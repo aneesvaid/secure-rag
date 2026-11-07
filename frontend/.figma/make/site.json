@@ -1,0 +1,11 @@
+{
+  "title": "SecureRAG — Enterprise Knowledge Assistant",
+  "description": "SecureRAG helps enterprise teams securely search company knowledge, get AI answers with citations, and manage documents, users, permissions, and audit activity.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
