@@ -17,19 +17,29 @@ SecureRAG is an enterprise knowledge assistant designed to ensure that users can
 - Audit logging
 - Security testing
 
-## Planned Technology Stack
+## Technology Stack
 
-- Python
-- FastAPI
-- PostgreSQL
-- pgvector
-- Sentence Transformers
-- LLM integration
-- Pytest
+- **Backend:** Python (FastAPI, Pydantic Settings, Uvicorn)
+- **Vector Database:** Qdrant (local loopback and remote/cloud clusters)
+- **LLM Support:** Dual cloud API providers (OpenAI, Anthropic) and local inference engines (Ollama, vLLM)
+- **Frontend:** React, Vite, Tailwind CSS (Emerald Slate theme)
+- **Testing:** Pytest
+
+## Supported Python Runtimes
+
+- **Testing Environment:** Python 3.15 (Windows CPython)
+- **Supported Deployment Versions:** Python 3.11, 3.12, 3.13, 3.14, 3.15
 
 ## Project Status
 
-Early development — environment setup completed.
+Modular development in progress.
+- **Frontend:** Completed and integrated.
+- **Backend Step 1:** Backend directory structure and baseline FastAPI initialization completed.
+- **Backend Step 2:** Centralized configuration, environment management, and logging security completed and verified.
+- **Remaining Steps:** Authentication/RBAC, Qdrant client integration, document ingestion/chunking, retrieval pipelines, and security testing.
+
+> [!NOTE]
+> The backend configuration and logging foundation is verified and hardened. However, the complete Secure RAG application is in active development and is **not yet fully production-ready**.
 
 ## Security Principle
 
