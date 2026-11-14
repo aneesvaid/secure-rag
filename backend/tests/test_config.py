@@ -41,7 +41,12 @@ def test_default_development_configuration():
     assert settings.LOG_LEVEL == "INFO"
     assert settings.JWT_ALGORITHM == "HS256"
     assert settings.ACCESS_TOKEN_EXPIRE_MINUTES == 60
-    assert settings.QDRANT_COLLECTION == "secure_rag_documents"
+    assert "postgresql+psycopg://" in settings.DATABASE_URL.get_secret_value()
+    assert settings.DB_POOL_SIZE == 10
+    assert settings.DB_MAX_OVERFLOW == 20
+    assert settings.DB_POOL_TIMEOUT == 30.0
+    assert settings.DB_POOL_RECYCLE == 1800
+    assert settings.DB_ECHO is False
     assert settings.LLM_PROVIDER == "openai"
     assert settings.LLM_TEMPERATURE == 0.0
     assert settings.LLM_MAX_TOKENS == 1024
@@ -56,7 +61,8 @@ def test_environment_variable_loading(monkeypatch):
     monkeypatch.setenv("PORT", "9000")
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
     monkeypatch.setenv("LLM_MODEL", "gpt-4o")
-    monkeypatch.setenv("QDRANT_COLLECTION", "custom_collection")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://custom_user:custom_pass@localhost:5432/custom_db")
+    monkeypatch.setenv("DB_POOL_SIZE", "15")
 
     settings = Settings()
 
@@ -64,7 +70,8 @@ def test_environment_variable_loading(monkeypatch):
     assert settings.PORT == 9000
     assert settings.LOG_LEVEL == "DEBUG"
     assert settings.LLM_MODEL == "gpt-4o"
-    assert settings.QDRANT_COLLECTION == "custom_collection"
+    assert settings.DATABASE_URL.get_secret_value() == "postgresql+psycopg://custom_user:custom_pass@localhost:5432/custom_db"
+    assert settings.DB_POOL_SIZE == 15
 
 
 def test_environment_mode_normalization():
@@ -135,7 +142,10 @@ def test_invalid_timeout_and_token_rejections():
         Settings(BCRYPT_ROUNDS=35)  # Above max 31
 
     with pytest.raises(ValidationError):
-        Settings(QDRANT_TIMEOUT=0)
+        Settings(DB_POOL_TIMEOUT=0)
+
+    with pytest.raises(ValidationError):
+        Settings(DB_POOL_SIZE=-1)
 
     with pytest.raises(ValidationError):
         Settings(LLM_TIMEOUT=-5.0)
@@ -196,18 +206,44 @@ def test_production_rejects_wildcard_cors_with_credentials():
     assert "Wildcard '*' in CORS_ORIGINS is prohibited" in str(exc.value)
 
 
-def test_production_requires_cloud_qdrant_api_key():
-    """Verify that production requires an API key when pointing to cloud Qdrant."""
+def test_production_rejects_dummy_database_password():
+    """Verify that production rejects default dummy password in DATABASE_URL."""
     with pytest.raises(ValidationError) as exc:
         Settings(
             APP_ENV="production",
             DEBUG=False,
             SECRET_KEY="a" * 32,
-            QDRANT_URL="https://my-cluster.cloud.qdrant.io:6333",
-            QDRANT_API_KEY=None,
+            DATABASE_URL="postgresql+psycopg://secure_rag_app:password@localhost:5432/secure_rag",
             LLM_API_KEY="sk-valid-key",
         )
-    assert "QDRANT_API_KEY is required in production" in str(exc.value)
+    assert "Default or dummy database password is not allowed in production" in str(exc.value)
+
+
+def test_production_rejects_sqlite_database():
+    """Verify that production rejects SQLite database."""
+    with pytest.raises(ValidationError) as exc:
+        Settings(
+            APP_ENV="production",
+            DEBUG=False,
+            SECRET_KEY="a" * 32,
+            DATABASE_URL="sqlite:///./prod.db",
+            LLM_API_KEY="sk-valid-key",
+        )
+    assert "SQLite database is not permitted in production" in str(exc.value)
+
+
+def test_production_rejects_db_echo():
+    """Verify that production rejects DB_ECHO=True."""
+    with pytest.raises(ValidationError) as exc:
+        Settings(
+            APP_ENV="production",
+            DEBUG=False,
+            SECRET_KEY="a" * 32,
+            DATABASE_URL="postgresql+psycopg://secure_rag_app:strong_prod_pass_12345@localhost:5432/secure_rag",
+            DB_ECHO=True,
+            LLM_API_KEY="sk-valid-key",
+        )
+    assert "DB_ECHO cannot be enabled in production" in str(exc.value)
 
 
 def test_production_requires_cloud_llm_api_key():
@@ -262,7 +298,7 @@ def test_production_valid_configuration():
         TRUSTED_HOSTS=["app.securerag.com", "localhost"],
         LLM_PROVIDER="openai",
         LLM_API_KEY="sk-production-test-key-valid",
-        QDRANT_URL="http://localhost:6333",
+        DATABASE_URL="postgresql+psycopg://secure_rag_app:strong_secure_prod_pass_99999@localhost:5432/secure_rag",
     )
     assert settings.is_production is True
     assert settings.DEBUG is False
@@ -308,79 +344,43 @@ def test_trusted_host_middleware_blocks_untrusted_host(monkeypatch):
 
 
 # ------------------------------------------------------------------------------
-# 7. Qdrant Settings Validation Tests
+# 7. Database Settings Validation Tests
 # ------------------------------------------------------------------------------
-def test_qdrant_configuration_helpers():
-    """Verify Qdrant local vs cloud detection and URL resolution."""
-    local_settings = Settings(QDRANT_URL="http://localhost:6333")
-    assert local_settings.effective_qdrant_url == "http://localhost:6333"
-    assert local_settings.is_qdrant_cloud is False
-
-    cloud_settings = Settings(QDRANT_URL="https://cluster.qdrant.tech:6333")
-    assert cloud_settings.is_qdrant_cloud is True
-
-    host_port_settings = Settings(QDRANT_HOST="qdrant.internal", QDRANT_PORT=6333)
-    assert host_port_settings.effective_qdrant_url == "http://qdrant.internal:6333"
-
-
-def test_qdrant_endpoint_classification_matrix():
-    """Verify robust endpoint classification across local loopbacks, custom domains, proxies, and explicit overrides."""
-    # Local loopbacks remain local
-    assert Settings(QDRANT_URL="http://localhost:6333").is_qdrant_cloud is False
-    assert Settings(QDRANT_URL="http://127.0.0.1:6333").is_qdrant_cloud is False
-    assert Settings(QDRANT_URL="http://0.0.0.0:6333").is_qdrant_cloud is False
-
-    # HTTPS endpoints are always remote
-    assert Settings(QDRANT_URL="https://localhost:6333").is_qdrant_cloud is True
-    assert Settings(QDRANT_URL="https://127.0.0.1:6333").is_qdrant_cloud is True
-
-    # Custom domains and internal reverse proxies are classified as remote
-    assert Settings(QDRANT_URL="http://vector.mycorp.internal:6333").is_qdrant_cloud is True
-    assert Settings(QDRANT_URL="http://10.244.0.15:6333").is_qdrant_cloud is True
-    assert Settings(QDRANT_URL="http://qdrant-service.default.svc.cluster.local:6333").is_qdrant_cloud is True
-
-    # Explicit QDRANT_REMOTE deployment override
-    assert Settings(QDRANT_URL="http://localhost:6333", QDRANT_REMOTE=True).is_qdrant_cloud is True
-    assert Settings(QDRANT_URL="http://localhost:6333", QDRANT_REMOTE=False).is_qdrant_cloud is False
+def test_database_configuration_defaults():
+    """Verify default PostgreSQL database settings and driver."""
+    settings = Settings()
+    raw_url = settings.DATABASE_URL.get_secret_value()
+    assert raw_url.startswith("postgresql+psycopg://")
+    assert "secure_rag" in raw_url
+    assert settings.DB_POOL_SIZE == 10
+    assert settings.DB_MAX_OVERFLOW == 20
+    assert settings.DB_POOL_TIMEOUT == 30.0
+    assert settings.DB_POOL_RECYCLE == 1800
+    assert settings.DB_ECHO is False
 
 
-def test_production_rejects_custom_domain_and_proxy_qdrant_without_api_key():
-    """Verify production rejects custom domains and reverse proxies lacking QDRANT_API_KEY, preventing credential bypass."""
-    # 1. Custom internal domain without API key
+def test_database_url_validation():
+    """Verify acceptance of valid PostgreSQL and SQLite URLs and rejection of unsupported schemes."""
+    # Valid PostgreSQL URLs
+    s1 = Settings(DATABASE_URL="postgresql+psycopg://user:pass@localhost:5432/db")
+    assert s1.DATABASE_URL.get_secret_value() == "postgresql+psycopg://user:pass@localhost:5432/db"
+
+    s2 = Settings(DATABASE_URL="postgresql://user:pass@localhost:5432/db")
+    assert s2.DATABASE_URL.get_secret_value() == "postgresql://user:pass@localhost:5432/db"
+
+    # Valid SQLite URL for testing
+    s3 = Settings(DATABASE_URL="sqlite:///./test.db")
+    assert s3.DATABASE_URL.get_secret_value() == "sqlite:///./test.db"
+
+    # Invalid scheme rejection
     with pytest.raises(ValidationError) as exc1:
-        Settings(
-            APP_ENV="production",
-            DEBUG=False,
-            SECRET_KEY="strong-key-at-least-32-chars-long-1234",
-            LLM_API_KEY="sk-valid-key",
-            QDRANT_URL="http://vector-proxy.internal.corp:6333",
-            QDRANT_API_KEY=None,
-        )
-    assert "QDRANT_API_KEY is required in production" in str(exc1.value)
+        Settings(DATABASE_URL="mysql://user:pass@localhost:3306/db")
+    assert "DATABASE_URL must start with" in str(exc1.value)
 
-    # 2. Remote IP reverse proxy without API key
+    # Empty URL rejection
     with pytest.raises(ValidationError) as exc2:
-        Settings(
-            APP_ENV="production",
-            DEBUG=False,
-            SECRET_KEY="strong-key-at-least-32-chars-long-1234",
-            LLM_API_KEY="sk-valid-key",
-            QDRANT_URL="http://10.0.1.50:6333",
-            QDRANT_API_KEY=None,
-        )
-    assert "QDRANT_API_KEY is required in production" in str(exc2.value)
-
-    # 3. Attempt to bypass validation by setting QDRANT_REMOTE=False on a non-local endpoint
-    with pytest.raises(ValidationError) as exc3:
-        Settings(
-            APP_ENV="production",
-            DEBUG=False,
-            SECRET_KEY="strong-key-at-least-32-chars-long-1234",
-            LLM_API_KEY="sk-valid-key",
-            QDRANT_URL="http://vector-proxy.internal.corp:6333",
-            QDRANT_REMOTE=False,
-        )
-    assert "Cannot set QDRANT_REMOTE=False for non-local endpoint" in str(exc3.value)
+        Settings(DATABASE_URL="")
+    assert "DATABASE_URL cannot be empty" in str(exc2.value)
 
 
 # ------------------------------------------------------------------------------
@@ -493,11 +493,11 @@ def test_explicit_secret_str_access_cannot_bypass_logging_redaction(monkeypatch)
     """Verify that even when SecretStr values are explicitly unmasked via .get_secret_value(),
     they are intercepted and masked by the logging sanitization filter and formatters."""
     raw_secret_key = "my-high-entropy-production-secret-9876543210"
-    raw_qdrant_key = "qdrant-cloud-auth-token-supersecret-12345"
+    raw_db_url = "postgresql+psycopg://app_user:db-secret-password-xyz-9876@localhost:5432/secure_rag"
     raw_llm_key = "custom-llm-cloud-token-topsecret-67890"
 
     monkeypatch.setenv("SECRET_KEY", raw_secret_key)
-    monkeypatch.setenv("QDRANT_API_KEY", raw_qdrant_key)
+    monkeypatch.setenv("DATABASE_URL", raw_db_url)
     monkeypatch.setenv("LLM_API_KEY", raw_llm_key)
     reset_settings()
 
@@ -522,20 +522,20 @@ def test_explicit_secret_str_access_cannot_bypass_logging_redaction(monkeypatch)
     assert raw_secret_key not in record.msg
     assert "********" in record.msg
 
-    # 2. Raw Qdrant key unmasked in positional args
-    unmasked_qdrant = get_settings().QDRANT_API_KEY.get_secret_value()
+    # 2. Raw Database password unmasked in positional args or URL
+    unmasked_db = get_settings().DATABASE_URL.get_secret_value()
     record_args = logging.LogRecord(
         name="test",
         level=logging.INFO,
         pathname="test.py",
         lineno=2,
-        msg="Connecting to vector store",
-        args=(unmasked_qdrant,),
+        msg="Connecting to database at URL",
+        args=(unmasked_db,),
         exc_info=None,
     )
     filter_.filter(record_args)
-    assert raw_qdrant_key not in record_args.args[0]
-    assert record_args.args[0] == "********"
+    assert "db-secret-password-xyz-9876" not in record_args.args[0]
+    assert "********" in record_args.args[0]
 
     # 3. Bare SecretStr object passed to log filter
     bare_secret = SecretStr("bare-secret-object-payload-999")

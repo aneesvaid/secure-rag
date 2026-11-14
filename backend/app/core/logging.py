@@ -31,11 +31,15 @@ SENSITIVE_PATTERNS = [
     re.compile(r"\b(eyJ[a-zA-Z0-9_\-]{10,}\.eyJ[a-zA-Z0-9_\-]{10,}\.[a-zA-Z0-9_\-]+)\b"),
     # Bearer tokens in headers: Bearer <token>
     re.compile(r"(?i)\bBearer\s+([a-zA-Z0-9_\-\.]{20,})\b"),
+    # Database connection URLs with embedded passwords: postgresql+psycopg://user:pass@host...
+    re.compile(r"(?i)\b((?:postgresql(?:\+psycopg)?|sqlite|mysql|mongodb)://[^:]+:)([^@]+)(@)"),
 ]
 
 # Keys whose contents should be masked or truncated if passed in structured data
 SENSITIVE_KEYS = {
     "password",
+    "db_password",
+    "database_url",
     "secret",
     "secret_key",
     "api_key",
@@ -89,9 +93,22 @@ class SensitiveDataFilter(logging.Filter):
         secrets: Set[str] = set()
         try:
             settings = get_settings()
+
+            # If DATABASE_URL contains user:password@host, extract password component
+            db_raw = settings.DATABASE_URL.get_secret_value().strip()
+            if "@" in db_raw and "://" in db_raw:
+                try:
+                    auth_part = db_raw.split("://", 1)[1].split("@", 1)[0]
+                    if ":" in auth_part:
+                        db_pass = auth_part.split(":", 1)[1].strip()
+                        if len(db_pass) >= 4 and db_pass.lower() not in {"password", "secret"}:
+                            secrets.add(db_pass)
+                except Exception:
+                    pass
+
             for secret_obj in (
                 settings.SECRET_KEY,
-                settings.QDRANT_API_KEY,
+                settings.DATABASE_URL,
                 settings.LLM_API_KEY,
                 settings.EMBEDDING_API_KEY,
             ):
@@ -124,14 +141,16 @@ class SensitiveDataFilter(logging.Filter):
             return text
         sanitized = text
         for pattern in SENSITIVE_PATTERNS:
-            sanitized = pattern.sub(
-                lambda m: (
-                    f"{m.group(1)}=********"
-                    if len(m.groups()) >= 2
-                    else "********"
-                ),
-                sanitized,
-            )
+            def _replace(m):
+                groups = m.groups()
+                if len(groups) == 3:
+                    # Database URL pattern: prefix, password, suffix
+                    return f"{groups[0]}********{groups[2]}"
+                elif len(groups) >= 2:
+                    return f"{groups[0]}=********"
+                return "********"
+
+            sanitized = pattern.sub(_replace, sanitized)
         # Redact any configured active secrets that were accessed or unmasked directly
         for secret_val in cls.get_configured_secret_values():
             if secret_val in sanitized:

@@ -7,6 +7,7 @@ from app.api.router import api_router
 from app.api.routes.health import router as health_router
 from app.core.config import get_settings
 from app.core.logging import logger, setup_logging
+from app.database.session import check_db_connectivity, engine
 
 
 @asynccontextmanager
@@ -20,8 +21,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         current_settings.APP_VERSION,
         current_settings.APP_ENV.value,
     )
+    # Verify database connectivity during startup
+    db_ok, db_err = check_db_connectivity()
+    if db_ok:
+        logger.info("Database connection verified successfully.")
+    else:
+        logger.warning("Database connectivity check: %s", db_err or "unavailable")
+
     yield
+
     logger.info("Shutting down %s", current_settings.APP_NAME)
+    engine.dispose()
 
 
 def create_application() -> FastAPI:

@@ -20,7 +20,7 @@ SecureRAG is an enterprise knowledge assistant designed to ensure that users can
 ## Technology Stack
 
 - **Backend:** Python (FastAPI, Pydantic Settings, Uvicorn)
-- **Vector Database:** Qdrant (local loopback and remote/cloud clusters)
+- **Database:** PostgreSQL (SQLAlchemy 2.x, psycopg 3 driver)
 - **LLM Support:** Dual cloud API providers (OpenAI, Anthropic) and local inference engines (Ollama, vLLM)
 - **Frontend:** React, Vite, Tailwind CSS (Emerald Slate theme)
 - **Testing:** Pytest
@@ -33,10 +33,12 @@ SecureRAG is an enterprise knowledge assistant designed to ensure that users can
 ## Project Status
 
 Modular development in progress.
-- **Frontend:** Completed and integrated.
+- **Frontend:** Completed prototype UI.
 - **Backend Step 1:** Backend directory structure and baseline FastAPI initialization completed.
 - **Backend Step 2:** Centralized configuration, environment management, and logging security completed and verified.
-- **Remaining Steps:** Authentication/RBAC, Qdrant client integration, document ingestion/chunking, retrieval pipelines, and security testing.
+- **Backend Step 3.1:** PostgreSQL server installation and database setup completed.
+- **Backend Step 3.2:** SQLAlchemy 2.x engine, connection pool, session factory, FastAPI dependency, and connectivity verification completed.
+- **Remaining Steps:** Authentication/RBAC, User & Document models, ingestion/chunking, retrieval pipelines, and security testing.
 
 > [!NOTE]
 > The backend configuration and logging foundation is verified and hardened. However, the complete Secure RAG application is in active development and is **not yet fully production-ready**.

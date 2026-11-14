@@ -8,7 +8,6 @@ from enum import Enum
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, List, Optional, Set, Union
-from urllib.parse import urlparse
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -89,19 +88,12 @@ SUPPORTED_HASH_ALGORITHMS: Set[str] = {
     "argon2",
 }
 
-LOCAL_HOSTS: Set[str] = {
-    "localhost",
-    "127.0.0.1",
-    "::1",
-    "0.0.0.0",
-}
-
 
 class Settings(BaseSettings):
     """Centralized application settings with environment validation."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(str(BACKEND_DIR / ".env"), ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
@@ -212,61 +204,45 @@ class Settings(BaseSettings):
         return v
 
     # --------------------------------------------------------------------------
-    # 4. Vector Database (Qdrant) Configuration
+    # 4. Database (PostgreSQL) Configuration
     # --------------------------------------------------------------------------
-    QDRANT_URL: str = Field(default="http://localhost:6333", description="Base URL for Qdrant service")
-    QDRANT_HOST: Optional[str] = Field(default=None, description="Qdrant hostname (legacy/alternative)")
-    QDRANT_PORT: Optional[int] = Field(default=6333, description="Qdrant REST port")
-    QDRANT_GRPC_PORT: int = Field(default=6334, description="Qdrant gRPC port")
-    QDRANT_API_KEY: Optional[SecretStr] = Field(default=None, description="Qdrant API key for cloud/secured instances")
-    QDRANT_COLLECTION: str = Field(default="secure_rag_documents", description="Target collection name")
-    QDRANT_REMOTE: Optional[bool] = Field(
-        default=None,
-        description="Explicit override: True if remote/cloud, False if local. If None, auto-detected from endpoint.",
+    DATABASE_URL: SecretStr = Field(
+        default=SecretStr("postgresql+psycopg://secure_rag_app:password@localhost:5432/secure_rag"),
+        description="PostgreSQL database connection URL (using psycopg 3 driver)",
     )
-    QDRANT_TIMEOUT: float = Field(default=10.0, description="Qdrant request timeout in seconds")
-    QDRANT_PREFER_GRPC: bool = Field(default=False, description="Prefer gRPC over HTTP for vector operations")
+    DB_POOL_SIZE: int = Field(default=10, description="Database connection pool size")
+    DB_MAX_OVERFLOW: int = Field(default=20, description="Database connection pool max overflow")
+    DB_POOL_TIMEOUT: float = Field(default=30.0, description="Database connection pool timeout in seconds")
+    DB_POOL_RECYCLE: int = Field(default=1800, description="Database connection pool recycle time in seconds")
+    DB_ECHO: bool = Field(default=False, description="Enable SQLAlchemy engine SQL statement logging")
 
-    @field_validator("QDRANT_TIMEOUT")
+    @field_validator("DATABASE_URL", mode="before")
     @classmethod
-    def validate_qdrant_timeout(cls, v: float) -> float:
-        if v <= 0:
-            raise ValueError("QDRANT_TIMEOUT must be positive")
+    def validate_database_url_format(cls, v: Any) -> Any:
+        raw_url = v.get_secret_value() if hasattr(v, "get_secret_value") else str(v)
+        raw_url = raw_url.strip()
+        if not raw_url:
+            raise ValueError("DATABASE_URL cannot be empty")
+        valid_prefixes = ("postgresql+psycopg://", "postgresql://", "sqlite://", "sqlite+pysqlite://")
+        if not any(raw_url.startswith(prefix) for prefix in valid_prefixes):
+            raise ValueError(
+                f"DATABASE_URL must start with 'postgresql+psycopg://' or 'postgresql://' (got '{raw_url.split('://')[0]}://...')"
+            )
+        return SecretStr(raw_url) if not isinstance(v, SecretStr) else v
+
+    @field_validator("DB_POOL_SIZE", "DB_MAX_OVERFLOW", "DB_POOL_RECYCLE")
+    @classmethod
+    def validate_positive_pool_ints(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("Database pool parameters cannot be negative")
         return v
 
-    @property
-    def effective_qdrant_url(self) -> str:
-        """Resolve effective Qdrant URL from QDRANT_URL or QDRANT_HOST/PORT."""
-        if self.QDRANT_HOST:
-            port_str = f":{self.QDRANT_PORT}" if self.QDRANT_PORT else ""
-            return f"http://{self.QDRANT_HOST}{port_str}"
-        return self.QDRANT_URL
-
-    @property
-    def is_qdrant_cloud(self) -> bool:
-        """Classify whether Qdrant endpoint is remote/cloud or local.
-
-        Prefers explicit deployment configuration (QDRANT_REMOTE) if set.
-        Otherwise performs robust endpoint classification against local loopbacks.
-        Any HTTPS endpoint, custom domain, reverse proxy, or non-loopback IP
-        is classified as remote/cloud to guarantee credential validation.
-        """
-        if self.QDRANT_REMOTE is not None:
-            return self.QDRANT_REMOTE
-
-        parsed = urlparse(self.effective_qdrant_url)
-        hostname = (parsed.hostname or "").lower().strip()
-
-        # Any HTTPS endpoint is remote/TLS-secured
-        if parsed.scheme == "https":
-            return True
-
-        # Check against known loopback / local addresses
-        if not hostname or hostname in LOCAL_HOSTS:
-            return False
-
-        # Any custom domain, reverse proxy, internal cluster, or remote IP is remote
-        return True
+    @field_validator("DB_POOL_TIMEOUT")
+    @classmethod
+    def validate_positive_pool_timeout(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("DB_POOL_TIMEOUT must be positive")
+        return v
 
     # --------------------------------------------------------------------------
     # 5. LLM and Embedding Configuration
@@ -436,31 +412,14 @@ class Settings(BaseSettings):
                     "Unsafe configuration: Wildcard '*' in CORS_ORIGINS is prohibited when CORS_ALLOW_CREDENTIALS is True in production."
                 )
 
-            # 4. Cloud / remote Qdrant requires an API key in production
-            parsed_qdrant = urlparse(self.effective_qdrant_url)
-            qdrant_host = (parsed_qdrant.hostname or "").lower().strip()
-
-            # Prevent misconfiguration trying to claim a non-local endpoint is local without credentials
-            if self.QDRANT_REMOTE is False and qdrant_host and qdrant_host not in LOCAL_HOSTS:
-                raise ValueError(
-                    f"Unsafe configuration: Cannot set QDRANT_REMOTE=False for non-local endpoint '{self.effective_qdrant_url}'. "
-                    "Custom domains, reverse proxies, and remote endpoints require credentials in production."
-                )
-
-            if self.is_qdrant_cloud:
-                if not self.QDRANT_API_KEY or not self.QDRANT_API_KEY.get_secret_value().strip():
-                    raise ValueError(
-                        f"Unsafe configuration: QDRANT_API_KEY is required in production when using remote or cloud Qdrant (endpoint: '{self.effective_qdrant_url}')."
-                    )
-
-            # 5. Cloud LLM provider requires an API key in production
+            # 4. Cloud LLM provider requires an API key in production
             if self.LLM_PROVIDER.lower() in CLOUD_LLM_PROVIDERS:
                 if not self.LLM_API_KEY or not self.LLM_API_KEY.get_secret_value().strip():
                     raise ValueError(
                         f"Unsafe configuration: LLM_API_KEY is required in production when LLM_PROVIDER is '{self.LLM_PROVIDER}'."
                     )
 
-            # 6. Cloud Embedding provider requires an API key in production
+            # 5. Cloud Embedding provider requires an API key in production
             if self.EMBEDDING_PROVIDER.lower() in ("openai", "azure_openai"):
                 has_emb_key = self.EMBEDDING_API_KEY and self.EMBEDDING_API_KEY.get_secret_value().strip()
                 has_llm_key = self.LLM_API_KEY and self.LLM_API_KEY.get_secret_value().strip()
@@ -469,10 +428,22 @@ class Settings(BaseSettings):
                         f"Unsafe configuration: EMBEDDING_API_KEY (or LLM_API_KEY) is required in production when EMBEDDING_PROVIDER is '{self.EMBEDDING_PROVIDER}'."
                     )
 
-            # 7. Trusted hosts must not be empty or wildcard in production
+            # 6. Trusted hosts must not be empty or wildcard in production
             hosts = self.TRUSTED_HOSTS if isinstance(self.TRUSTED_HOSTS, list) else [self.TRUSTED_HOSTS]
             if not hosts or "*" in hosts:
                 raise ValueError("Unsafe configuration: TRUSTED_HOSTS cannot be empty or wildcard '*' in production.")
+
+            # 7. Database configuration check in production
+            db_url = self.DATABASE_URL.get_secret_value().strip()
+            if "password@" in db_url or "your_password_here" in db_url:
+                raise ValueError(
+                    "Unsafe configuration: Default or dummy database password is not allowed in production. "
+                    "Configure a secure DATABASE_URL in production environment."
+                )
+            if db_url.startswith("sqlite"):
+                raise ValueError("Unsafe configuration: SQLite database is not permitted in production.")
+            if self.DB_ECHO:
+                raise ValueError("Unsafe configuration: DB_ECHO cannot be enabled in production.")
 
         return self
 
